@@ -15,15 +15,10 @@ import android.graphics.Matrix
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
-import android.media.MediaMetadata
-import android.media.session.MediaController
-import android.media.session.MediaSessionManager
-import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
@@ -52,7 +47,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.exifinterface.media.ExifInterface
@@ -120,8 +114,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var mProgress: ProgressBar
     private lateinit var mElapsed: TextView
     private lateinit var mRemain: TextView
-    private var controller: MediaController? = null
-    private var listeningSessions = false
 
     private val pickPhotos =
         registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
@@ -221,18 +213,6 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(ticker)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        controller?.unregisterCallback(controllerCallback)
-        if (listeningSessions) {
-            try {
-                (getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager)
-                    .removeOnActiveSessionsChangedListener(sessionsListener)
-            } catch (_: Exception) {
-            }
-        }
     }
 
     // ---------------------------------------------------------------- helpers
@@ -525,7 +505,7 @@ class MainActivity : ComponentActivity() {
 
     private fun drawerMenu(app: AppInfo) {
         dialog().setTitle(app.label)
-            .setItems(arrayOf("Add to home list", "Set as quick app", "App info", "Uninstall")) { _, w ->
+            .setItems(arrayOf("Add to home list", "Set as quick app", "App info / uninstall")) { _, w ->
                 when (w) {
                     0 -> { setFavs((favs() + app).distinctBy { it.key }); renderFavs() }
                     1 -> dialog().setTitle("Replace which quick app?")
@@ -533,7 +513,6 @@ class MainActivity : ComponentActivity() {
                             saveSlot("dock$s", app); renderDock()
                         }.show()
                     2 -> appInfo(app)
-                    3 -> safeStart(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}")))
                 }
             }
             .show()
@@ -807,9 +786,9 @@ class MainActivity : ComponentActivity() {
         times.addView(mElapsed, LinearLayout.LayoutParams(0, WRAP, 1f))
         times.addView(mRemain)
         screen.addView(times, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(4) })
-        screen.setOnClickListener {
-            if (!hasNotifAccess()) safeStart(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-        }
+        mProgress.visibility = View.GONE
+        times.visibility = View.GONE
+        screen.setOnClickListener { openYtMusic() }
         col.addView(screen, LinearLayout.LayoutParams(MATCH, dp(250)).apply { topMargin = dp(24) })
 
         col.addView(Space(ctx), weight())
@@ -878,114 +857,29 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun media(code: Int) {
-        val c = controller
-        if (c != null) {
-            val t = c.transportControls
-            when (code) {
-                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> t.skipToPrevious()
-                KeyEvent.KEYCODE_MEDIA_NEXT -> t.skipToNext()
-                else -> if (c.playbackState?.state == PlaybackState.STATE_PLAYING) t.pause() else t.play()
-            }
-            return
-        }
-        // No session info: send a normal media button press (goes to the last music app).
+        // A normal media-button press: goes to the music app that played last (YT Music).
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        handler.postDelayed({ updateMusic() }, 500)
     }
 
-    private fun hasNotifAccess() =
-        NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(packageName)
-
-    private val sessionsListener =
-        MediaSessionManager.OnActiveSessionsChangedListener { list -> pickController(list) }
-
-    private val controllerCallback = object : MediaController.Callback() {
-        override fun onMetadataChanged(metadata: MediaMetadata?) = updateMusic()
-        override fun onPlaybackStateChanged(state: PlaybackState?) = updateMusic()
-        override fun onSessionDestroyed() = connectMedia()
-    }
-
-    private fun connectMedia() {
-        if (!hasNotifAccess()) {
-            controller = null
-            updateMusic()
-            return
-        }
-        val msm = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
-        val cn = ComponentName(ctx, MediaListener::class.java)
-        try {
-            if (!listeningSessions) {
-                msm.addOnActiveSessionsChangedListener(sessionsListener, cn)
-                listeningSessions = true
-            }
-            pickController(msm.getActiveSessions(cn))
-        } catch (_: SecurityException) {
-            controller = null
-            updateMusic()
-        }
-    }
-
-    private fun pickController(list: List<MediaController>?) {
-        controller?.unregisterCallback(controllerCallback)
-        controller = list?.firstOrNull { it.packageName == YTM } ?: list?.firstOrNull()
-        controller?.registerCallback(controllerCallback, handler)
-        updateMusic()
-    }
+    private fun connectMedia() = updateMusic()
 
     private val ticker = object : Runnable {
         override fun run() {
-            if (controller != null) updateMusic()
+            updateMusic()
             handler.postDelayed(this, 1000)
         }
     }
 
-    private fun fmt(ms: Long): String {
-        val s = ms / 1000
-        return "%d:%02d".format(s / 60, s % 60)
-    }
-
     private fun updateMusic() {
         if (!::mTitle.isInitialized) return
-        if (!hasNotifAccess()) {
-            mTitle.text = "Show what's playing"
-            mArtist.text = "Tap here and allow Minimal Launcher"
-            mState.text = ""; mStatus.text = ""
-            mProgress.progress = 0; mElapsed.text = ""; mRemain.text = ""
-            return
-        }
-        val c = controller
-        val m = c?.metadata
-        if (c == null || m == null) {
-            mTitle.text = "Nothing playing"
-            mArtist.text = "Press MENU to open YT Music"
-            mState.text = "❚❚"; mStatus.text = ""
-            mProgress.progress = 0; mElapsed.text = "0:00"; mRemain.text = "-0:00"
-            return
-        }
-        mTitle.text = m.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "Unknown song"
-        mArtist.text = m.getString(MediaMetadata.METADATA_KEY_ARTIST)
-            ?: m.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
-        mStatus.text = if (c.packageName == YTM) "" else appLabel(c.packageName)
-
-        val st = c.playbackState
-        val playing = st?.state == PlaybackState.STATE_PLAYING
-        mState.text = if (playing) "▶" else "❚❚"
-        val duration = m.getLong(MediaMetadata.METADATA_KEY_DURATION)
-        var pos = st?.position ?: 0L
-        if (playing && st != null) {
-            pos += ((SystemClock.elapsedRealtime() - st.lastPositionUpdateTime) * st.playbackSpeed).toLong()
-        }
-        if (duration > 0) {
-            pos = pos.coerceIn(0L, duration)
-            mProgress.progress = (pos * 1000 / duration).toInt()
-            mElapsed.text = fmt(pos)
-            mRemain.text = "-" + fmt(duration - pos)
-        } else {
-            mProgress.progress = 0
-            mElapsed.text = fmt(pos.coerceAtLeast(0L))
-            mRemain.text = ""
-        }
+        val playing = (getSystemService(AUDIO_SERVICE) as AudioManager).isMusicActive
+        mState.text = if (playing) "\u25B6" else "\u275A\u275A"
+        mTitle.text = if (playing) "Playing" else "Paused"
+        mArtist.text = if (playing) "Left / right to skip, centre to pause" else "Press play, or MENU to open YT Music"
+        mStatus.text = ""
     }
 }
 

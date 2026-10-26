@@ -30,6 +30,6 @@ and press Run.
 4. **App list:** long-press any app to add it to home, set it as a quick icon, see app info or uninstall.
 5. **Memories:** tap "+ add photos" and pick family photos. A different photo shows each day;
    tap the caption to write who and where. Long-press the photo to remove it.
-6. **Music:** tap the light screen once and allow **Minimal Launcher music info**
-   so it can show the song name and progress. MENU opens YT Music, the centre and
+6. **Music:** start a song in YT Music once,
+   then the wheel controls it. MENU (or the light screen) opens YT Music, the centre and
    bottom buttons play/pause, left and right skip.
